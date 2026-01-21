@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jetysai Earth Hybrid + Google Street View</title>
+    
+    <!-- Все стили в отдельном файле -->
+    <link rel="stylesheet" href="style.css">
+    
+    <!-- Внешние библиотеки -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+
+<body>
+    <!-- Основные контейнеры -->
+    <div id="earth"></div>
+    <div id="map"></div>
+    <div id="panorama-viewer"></div>
+    <div id="editor-overlay"></div>
+    
+    <!-- UI элементы -->
+    <div id="label">Жетысай · Туркестанская область · Казахстан</div>
+    <button id="back-button">← Назад к карте</button>
+    <button id="select-coords-btn">📍 Выбрать координаты</button>
+    <button id="search-streetview-btn">🌍 Поиск Street View</button>
+    <button id="cache-manager-btn">💾 Управление кэшем</button>
+    <div id="edit-indicator">✏️ Режим редактирования (Ctrl+Alt+A)</div>
+
+    <!-- Панель режимов редактирования -->
+    <div id="edit-modes-panel">
+        <h3>🎮 Режимы редактирования</h3>
+        <div class="edit-mode-buttons">
+            <button class="edit-mode-btn active" id="add-mode-btn">
+                <i class="fas fa-plus-circle"></i> Добавление
+            </button>
+            <button class="edit-mode-btn" id="edit-mode-btn">
+                <i class="fas fa-edit"></i> Редактирование
+            </button>
+            <button class="edit-mode-btn" id="delete-mode-btn">
+                <i class="fas fa-trash"></i> Удаление
+            </button>
+        </div>
+    </div>
+
+    <!-- Панель управления кэшем -->
+    <div id="cache-panel">
+        <h3>💾 Управление кэшем</h3>
+        <button class="cache-btn" id="export-cache-btn">
+            <i class="fas fa-download"></i> Скачать кэш-файл
+        </button>
+        <button class="cache-btn" id="import-cache-btn">
+            <i class="fas fa-upload"></i> Загрузить кэш-файл
+        </button>
+        <button class="cache-btn" id="clear-cache-btn">
+            <i class="fas fa-trash"></i> Очистить локальный кэш
+        </button>
+        <div class="cache-info">
+            <small>💡 Кэш-файл: <strong>jetysai_panoramas_cache.json</strong><br>
+            Файл создается рядом с этим скриптом</small>
+        </div>
+    </div>
+
+    <!-- Панель поиска Street View -->
+    <div id="streetview-panel">
+        <h3>🌍 Поиск Street View</h3>
+        <input type="text" class="streetview-search-input" placeholder="Введите место в Жетысае..." id="streetview-search-input">
+        <div class="streetview-results" id="streetview-results"></div>
+        <div class="streetview-info">
+            <small>💡 Автоматически загружаются панорамы Google Street View</small>
+        </div>
+    </div>
+
+    <!-- Модальное окно выбора координат -->
+    <div id="coords-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>📍 Выбор координат на карте</h2>
+                <p>Кликните на карте для выбора местоположения, затем подтвердите выбор</p>
+            </div>
+            <div class="modal-body">
+                <div id="modal-map-container">
+                    <div id="modal-map"></div>
+                </div>
+                <div class="modal-info">
+                    <div class="coords-display">
+                        <h4>Выбранные координаты:</h4>
+                        <div id="selected-coords">Не выбрано</div>
+                    </div>
+                    <div class="coords-instructions">
+                        <h4>Инструкция:</h4>
+                        <ul>
+                            <li><strong>Кликните</strong> на карте в нужном месте</li>
+                            <li><strong>Перетащите</strong> маркер для точной настройки</li>
+                            <li><strong>Используйте колесо мыши</strong> для увеличения/уменьшения</li>
+                            <li><strong>Зажмите левую кнопку мыши</strong> для перемещения по карте</li>
+                            <li><strong>Нажмите "Подтвердить"</strong> для сохранения координат</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-btn" id="cancel-modal-btn">
+                    <i class="fas fa-times"></i> Отменить
+                </button>
+                <button class="modal-btn" id="confirm-modal-btn">
+                    <i class="fas fa-check"></i> Подтвердить выбор
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Консоль -->
+    <div id="editor-console">
+        <button class="console-close">×</button>
+        <div id="console-content"></div>
+    </div>
+    
+    <!-- Индикатор загрузки -->
+    <div id="loading">
+        <div class="loading-spinner"></div>
+        Загрузка 3D Земли...
+    </div>
+
+    <!-- Основной JavaScript -->
+    <script src="script.js"></script>
+</body>
+</html>

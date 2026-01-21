@@ -1,0 +1,1763 @@
+// ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
+let map = null;
+let earthScene = null;
+let currentView = 'earth';
+let panoramaScene = null;
+let currentPanorama = null;
+let editMode = false;
+let selectedLocation = null;
+let editHistory = [];
+let currentHistoryIndex = -1;
+let selectingCoords = false;
+let coordMarker = null;
+let currentEditPanorama = null;
+let streetViewSearchMode = false;
+let currentEditMode = 'add';
+let cacheManagerOpen = false;
+let userLocationMarker = null;
+let userLocation = null;
+let panoramaMarkers = {}; // Хранилище маркеров
+
+// Переменные для модального окна
+let modalMap = null;
+let modalMarker = null;
+let modalSelectedLocation = null;
+
+// ========== СИСТЕМА КЭШИРОВАНИЯ ==========
+const CACHE_FILE_NAME = 'jetysai_panoramas_cache.json';
+let cacheFilePath = '';
+
+// Определяем путь к файлу кэша
+function getCacheFilePath() {
+    try {
+        const scripts = document.getElementsByTagName('script');
+        const currentScript = scripts[scripts.length - 1];
+        const scriptPath = currentScript.src || window.location.href;
+        
+        if (scriptPath.includes('http')) {
+            const url = new URL(scriptPath);
+            const pathParts = url.pathname.split('/');
+            pathParts.pop();
+            return url.origin + pathParts.join('/') + '/' + CACHE_FILE_NAME;
+        } else {
+            const pathParts = window.location.pathname.split('/');
+            pathParts.pop();
+            return window.location.origin + pathParts.join('/') + '/' + CACHE_FILE_NAME;
+        }
+    } catch (e) {
+        return CACHE_FILE_NAME;
+    }
+}
+
+// Функция очистки данных от циклических ссылок
+function cleanPanoramaData(data) {
+    if (!Array.isArray(data)) return [];
+    
+    return data.map(pano => {
+        const cleanPano = {
+            id: pano.id || Date.now(),
+            name: pano.name || 'Без названия',
+            description: pano.description || '',
+            location: Array.isArray(pano.location) ? pano.location : 
+                     (pano.lat && pano.lng) ? [pano.lat, pano.lng] : [40.77, 68.3],
+            date: pano.date || 'Не указана',
+            imageUrl: pano.imageUrl || '',
+            details: pano.details || '',
+            icon: pano.icon || '🏛️',
+            source: pano.source || 'user',
+            panoId: pano.panoId || `user_${Date.now()}`
+        };
+        
+        // Удаляем все возможные циклические ссылки
+        Object.keys(cleanPano).forEach(key => {
+            if (cleanPano[key] && typeof cleanPano[key] === 'object') {
+                if (cleanPano[key]._leaflet_id || cleanPano[key]._map || cleanPano[key]._popup) {
+                    delete cleanPano[key];
+                }
+            }
+        });
+        
+        return cleanPano;
+    });
+}
+
+// Загрузка данных из кэш-файла
+async function loadFromCacheFile() {
+    try {
+        cacheFilePath = getCacheFilePath();
+        console.log(`🔍 Ищу кэш-файл по пути: ${cacheFilePath}`);
+        
+        const response = await fetch(cacheFilePath + '?t=' + Date.now());
+        
+        if (response.ok) {
+            const data = await response.json();
+            if (data && Array.isArray(data.panoramas)) {
+                panoramas = cleanPanoramaData(data.panoramas);
+                logToConsole(`✅ Загружено ${panoramas.length} панорам из кэш-файла`, 'success');
+                return true;
+            }
+        }
+        return false;
+    } catch (error) {
+        console.log('❌ Файл кэша не найден или ошибка загрузки:', error.message);
+        return false;
+    }
+}
+
+// Сохранение данных в кэш-файл
+async function saveCacheFile() {
+    try {
+        // Очищаем данные перед сохранением
+        const cleanPanoramas = cleanPanoramaData(panoramas);
+        
+        const cacheData = {
+            version: '2.0',
+            lastModified: new Date().toISOString(),
+            generatedBy: 'Jetysai Earth Hybrid',
+            panoramas: cleanPanoramas
+        };
+        
+        const jsonStr = JSON.stringify(cacheData, null, 2);
+        const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = CACHE_FILE_NAME;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        
+        // Сохраняем резервную копию в localStorage
+        localStorage.setItem('panoramas_cache_backup', jsonStr);
+        
+        // Показываем ссылку для скачивания
+        showCacheDownloadLink(url);
+        
+        logToConsole(`💾 Кэш-файл сохранен (${panoramas.length} объектов)`, 'success');
+        showNotification(`💾 Кэш-файл сохранен: ${CACHE_FILE_NAME}`);
+        
+        return true;
+    } catch (error) {
+        logToConsole(`❌ Ошибка сохранения кэш-файла: ${error.message}`, 'error');
+        
+        // Пробуем простой метод сохранения
+        try {
+            await saveCacheFileSimple();
+        } catch (altError) {
+            logToConsole(`❌ Простое сохранение тоже не удалось`, 'error');
+        }
+        
+        return false;
+    }
+}
+
+// Простой метод сохранения
+async function saveCacheFileSimple() {
+    const simplePanoramas = panoramas.map(p => ({
+        id: p.id,
+        name: p.name,
+        description: p.description,
+        location: Array.isArray(p.location) ? p.location : [p.location?.lat || 40.77, p.location?.lng || 68.3],
+        date: p.date,
+        imageUrl: p.imageUrl,
+        details: p.details,
+        icon: p.icon,
+        source: p.source,
+        panoId: p.panoId
+    }));
+    
+    const cacheData = {
+        version: '2.0-simple',
+        lastModified: new Date().toISOString(),
+        generatedBy: 'Jetysai Earth Hybrid',
+        panoramas: simplePanoramas
+    };
+    
+    const jsonStr = JSON.stringify(cacheData, null, 2);
+    const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = CACHE_FILE_NAME;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    
+    localStorage.setItem('panoramas_cache_simple', jsonStr);
+    
+    logToConsole('💾 Кэш-файл сохранен (упрощенный метод)', 'success');
+    return true;
+}
+
+// Показываем ссылку для скачивания кэша
+function showCacheDownloadLink(url) {
+    const existingLink = document.getElementById('cache-download-link');
+    if (existingLink) {
+        existingLink.remove();
+    }
+    
+    const linkDiv = document.createElement('div');
+    linkDiv.id = 'cache-download-link';
+    linkDiv.style.cssText = `
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        background: rgba(0, 100, 0, 0.9);
+        color: white;
+        padding: 15px 20px;
+        border-radius: 10px;
+        z-index: 10000;
+        border: 2px solid #00ff00;
+        box-shadow: 0 0 20px rgba(0, 255, 0, 0.5);
+        max-width: 300px;
+    `;
+    
+    linkDiv.innerHTML = `
+        <strong>💾 Кэш-файл готов!</strong><br>
+        <small>Скачайте файл и поместите рядом с HTML-файлом:</small><br>
+        <a href="${url}" download="${CACHE_FILE_NAME}" 
+           style="color: #00ffff; font-weight: bold; word-break: break-all;">
+           ${CACHE_FILE_NAME}
+        </a><br>
+        <small style="color:#90ff90;">При следующей загрузке данные загрузятся из этого файла</small><br>
+        <button onclick="this.parentNode.remove()" 
+                style="margin-top:10px; background:#ff4444; color:white; border:none; padding:5px 10px; border-radius:5px; cursor:pointer; font-size:12px;">
+            ✕ Закрыть
+        </button>
+    `;
+    
+    document.body.appendChild(linkDiv);
+}
+
+// Загрузка кэш-файла
+function importCacheFile() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.style.display = 'none';
+    
+    input.onchange = async function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+        
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            try {
+                const data = JSON.parse(e.target.result);
+                if (data && Array.isArray(data.panoramas)) {
+                    panoramas = cleanPanoramaData(data.panoramas);
+                    
+                    // Сохраняем резервную копию
+                    localStorage.setItem('panoramas_cache_backup', JSON.stringify(data));
+                    
+                    // Обновляем карту
+                    updatePanoramasOnMap();
+                    
+                    // Показываем уведомление
+                    logToConsole(`✅ Импортировано ${panoramas.length} панорам из файла`, 'success');
+                    showNotification(`✅ Импортировано ${panoramas.length} панорам`);
+                    
+                    // Закрываем панель кэша
+                    toggleCacheManager();
+                } else {
+                    throw new Error('Неверный формат файла');
+                }
+            } catch (error) {
+                logToConsole('❌ Ошибка загрузки файла: ' + error.message, 'error');
+                showNotification('❌ Ошибка загрузки файла', 'error');
+            }
+        };
+        reader.readAsText(file);
+    };
+    
+    document.body.appendChild(input);
+    input.click();
+    document.body.removeChild(input);
+}
+
+// Очистка локального кэша
+function clearLocalCache() {
+    if (confirm('Удалить все локальные данные? Это не удалит кэш-файл.')) {
+        localStorage.removeItem('panoramas_cache_backup');
+        localStorage.removeItem('panoramas_cache_simple');
+        panoramas = [];
+        panoramaMarkers = {};
+        updatePanoramasOnMap();
+        logToConsole('🗑️ Локальный кэш очищен', 'warning');
+        showNotification('🗑️ Локальный кэш очищен');
+        toggleCacheManager();
+    }
+}
+
+// Переключение панели управления кэшем
+function toggleCacheManager() {
+    cacheManagerOpen = !cacheManagerOpen;
+    const panel = document.getElementById('cache-panel');
+    const btn = document.getElementById('cache-manager-btn');
+    
+    if (cacheManagerOpen) {
+        panel.style.display = 'block';
+        btn.style.background = 'rgba(156,39,176,1)';
+        btn.style.borderColor = '#9c27b0';
+    } else {
+        panel.style.display = 'none';
+        btn.style.background = 'rgba(156,39,176,0.9)';
+        btn.style.borderColor = '#9c27b0';
+    }
+}
+
+// ========== БАЗА ДАННЫХ ПАНОРАМ ==========
+let panoramas = [];
+
+// Инициализация данных
+async function initializePanoramas() {
+    console.log('🔄 Инициализация системы...');
+    
+    // Пытаемся загрузить из кэш-файла
+    await loadFromCacheFile();
+    
+    // Если ничего не загружено, оставляем пустой массив
+    if (panoramas.length === 0) {
+        logToConsole('📝 Кэш-файл не найден. Добавляйте свои панорамы', 'info');
+    }
+    
+    logToConsole('✅ Система инициализирована', 'success');
+}
+
+// ========== ГЕОЛОКАЦИЯ ПОЛЬЗОВАТЕЛЯ ==========
+function setupUserLocation() {
+    if (!navigator.geolocation) {
+        logToConsole('❌ Геолокация не поддерживается вашим браузером', 'error');
+        return;
+    }
+    
+    navigator.geolocation.getCurrentPosition(
+        function(position) {
+            userLocation = {
+                lat: position.coords.latitude,
+                lng: position.coords.longitude,
+                accuracy: position.coords.accuracy
+            };
+            
+            logToConsole(`📍 Ваше местоположение: ${userLocation.lat.toFixed(6)}, ${userLocation.lng.toFixed(6)}`, 'success');
+            
+            addUserLocationMarker();
+            startLocationTracking();
+        },
+        function(error) {
+            logToConsole('❌ Не удалось получить ваше местоположение: ' + error.message, 'error');
+        },
+        {
+            enableHighAccuracy: true,
+            timeout: 10000,
+            maximumAge: 0
+        }
+    );
+}
+
+// Добавление маркера текущего местоположения
+function addUserLocationMarker() {
+    if (!map || !userLocation) return;
+    
+    if (userLocationMarker) {
+        map.removeLayer(userLocationMarker);
+    }
+    
+    const locationIcon = L.divIcon({
+        html: `
+            <div class="location-marker">
+                <div class="icon">
+                    <i class="fas fa-user"></i>
+                </div>
+            </div>`,
+        iconSize: [35, 35],
+        iconAnchor: [17.5, 17.5],
+        className: 'user-location-icon'
+    });
+    
+    userLocationMarker = L.marker([userLocation.lat, userLocation.lng], {
+        icon: locationIcon,
+        title: "Ваше текущее местоположение",
+        zIndexOffset: 2000
+    }).addTo(map);
+    
+    userLocationMarker.bindPopup(`
+        <div style="text-align:center;">
+            <h4 style="margin:0 0 5px 0; color:#4285f4;">📍 Вы здесь</h4>
+            <p style="margin:0; font-size:12px;">
+                Широта: ${userLocation.lat.toFixed(6)}<br>
+                Долгота: ${userLocation.lng.toFixed(6)}
+            </p>
+            <small style="color:#666;">Точность: ±${Math.round(userLocation.accuracy)} м</small>
+        </div>
+    `);
+    
+    if (panoramas.length === 0) {
+        map.setView([userLocation.lat, userLocation.lng], 15);
+    }
+}
+
+// Отслеживание изменений местоположения
+function startLocationTracking() {
+    if (!navigator.geolocation) return;
+    
+    navigator.geolocation.watchPosition(
+        function(position) {
+            const newLocation = {
+                lat: position.coords.latitude,
+                lng: position.coords.longitude,
+                accuracy: position.coords.accuracy
+            };
+            
+            if (!userLocation || 
+                Math.abs(userLocation.lat - newLocation.lat) > 0.0001 ||
+                Math.abs(userLocation.lng - newLocation.lng) > 0.0001) {
+                
+                userLocation = newLocation;
+                
+                if (userLocationMarker && map) {
+                    userLocationMarker.setLatLng([userLocation.lat, userLocation.lng]);
+                } else {
+                    addUserLocationMarker();
+                }
+            }
+        },
+        function(error) {
+            console.log('Ошибка отслеживания местоположения:', error.message);
+        },
+        {
+            enableHighAccuracy: true,
+            maximumAge: 10000,
+            timeout: 15000
+        }
+    );
+}
+
+// ========== РЕЖИМЫ РЕДАКТИРОВАНИЯ ==========
+function setEditMode(mode) {
+    currentEditMode = mode;
+    
+    document.querySelectorAll('.edit-mode-btn').forEach(btn => {
+        btn.classList.remove('active');
+    });
+    
+    switch(mode) {
+        case 'add':
+            document.getElementById('add-mode-btn').classList.add('active');
+            logToConsole('➕ Режим добавления объектов', 'info');
+            showNotification('➕ Режим добавления: кликните на карте');
+            break;
+        case 'edit':
+            document.getElementById('edit-mode-btn').classList.add('active');
+            logToConsole('✏️ Режим редактирования объектов', 'info');
+            showNotification('✏️ Режим редактирования: кликните на объекте');
+            break;
+        case 'delete':
+            document.getElementById('delete-mode-btn').classList.add('active');
+            logToConsole('🗑️ Режим удаления объектов', 'warning');
+            showNotification('🗑️ Режим удаления: кликните на объекте для удаления');
+            break;
+    }
+}
+
+// ========== ГОРЯЧИЕ КЛАВИШИ ==========
+let keysPressed = {};
+
+function setupHotkeys() {
+    document.addEventListener('keydown', function(e) {
+        keysPressed[e.key.toLowerCase()] = true;
+        
+        if ((e.ctrlKey || e.metaKey) && e.altKey && e.key.toLowerCase() === 'a') {
+            e.preventDefault();
+            if (!editMode && currentView === 'map') {
+                activateEditMode();
+            } else if (editMode) {
+                deactivateEditMode();
+            }
+        }
+        
+        if (editMode) {
+            if (e.key === '1') {
+                e.preventDefault();
+                setEditMode('add');
+            }
+            else if (e.key === '2') {
+                e.preventDefault();
+                setEditMode('edit');
+            }
+            else if (e.key === '3') {
+                e.preventDefault();
+                setEditMode('delete');
+            }
+            else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+                e.preventDefault();
+                saveCacheFile();
+            }
+        }
+        
+        if (e.key === 'Escape') {
+            if (document.getElementById('coords-modal').classList.contains('active')) {
+                closeCoordsModal();
+            } else if (currentView === 'panorama') {
+                closePanorama();
+            } else if (editMode) {
+                deactivateEditMode();
+                closeEditor();
+            } else if (cacheManagerOpen) {
+                toggleCacheManager();
+            }
+        }
+    });
+    
+    document.addEventListener('keyup', function(e) {
+        delete keysPressed[e.key.toLowerCase()];
+    });
+}
+
+// Активация режима редактирования
+function activateEditMode() {
+    editMode = true;
+    document.getElementById('edit-indicator').style.display = 'block';
+    document.getElementById('select-coords-btn').style.display = 'block';
+    document.getElementById('search-streetview-btn').style.display = 'block';
+    document.getElementById('cache-manager-btn').style.display = 'block';
+    document.getElementById('edit-modes-panel').style.display = 'block';
+    logToConsole('✏️ Режим редактирования активирован (Ctrl+Alt+A)', 'success');
+    showNotification('✏️ Режим редактирования активирован');
+    setEditMode('add');
+}
+
+// Деактивация режима редактирования
+function deactivateEditMode() {
+    editMode = false;
+    currentEditMode = 'add';
+    document.getElementById('edit-indicator').style.display = 'none';
+    document.getElementById('select-coords-btn').style.display = 'none';
+    document.getElementById('search-streetview-btn').style.display = 'none';
+    document.getElementById('cache-manager-btn').style.display = 'none';
+    document.getElementById('edit-modes-panel').style.display = 'none';
+    document.getElementById('streetview-panel').style.display = 'none';
+    document.getElementById('cache-panel').style.display = 'none';
+    streetViewSearchMode = false;
+    cacheManagerOpen = false;
+    closeEditor();
+    logToConsole('✅ Режим редактирования деактивирован', 'info');
+    showNotification('✅ Режим редактирования деактивирован');
+}
+
+// Показать уведомление
+function showNotification(message, type = 'success') {
+    const notification = document.createElement('div');
+    notification.style.cssText = `
+        position: fixed;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: ${type === 'success' ? 'rgba(0,255,0,0.9)' : 
+                    type === 'error' ? 'rgba(255,0,0,0.9)' : 
+                    type === 'warning' ? 'rgba(255,170,0,0.9)' : 
+                    'rgba(66,133,244,0.9)'};
+        color: white;
+        padding: 15px 25px;
+        border-radius: 10px;
+        z-index: 3001;
+        box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        font-weight: bold;
+        animation: slideIn 0.3s ease;
+    `;
+    
+    notification.innerHTML = message;
+    document.body.appendChild(notification);
+    
+    setTimeout(() => {
+        notification.style.animation = 'slideOut 0.3s ease';
+        setTimeout(() => {
+            document.body.removeChild(notification);
+        }, 300);
+    }, 3000);
+}
+
+// ========== МОДАЛЬНОЕ ОКНО ДЛЯ ВЫБОРА КООРДИНАТ ==========
+function openCoordsModal() {
+    if (!editMode) {
+        showNotification('❌ Сначала активируйте режим редактирования (Ctrl+Alt+A)', 'error');
+        return;
+    }
+    
+    modalSelectedLocation = selectedLocation;
+    document.getElementById('coords-modal').classList.add('active');
+    setTimeout(() => {
+        initModalMap();
+    }, 100);
+}
+
+function closeCoordsModal() {
+    document.getElementById('coords-modal').classList.remove('active');
+    if (modalMap) {
+        modalMap.remove();
+        modalMap = null;
+    }
+    modalMarker = null;
+}
+
+function initModalMap() {
+    const modalMapContainer = document.getElementById('modal-map');
+    if (!modalMapContainer) return;
+    
+    modalMapContainer.innerHTML = '';
+    
+    modalMap = L.map('modal-map', {
+        zoomControl: true,
+        attributionControl: false,
+        dragging: true
+    }).setView([40.77, 68.3], 13);
+    
+    const satelliteWithLabels = L.tileLayer('http://{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', {
+        maxZoom: 20,
+        subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
+        attribution: ''
+    });
+    
+    const regularMap = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: ''
+    });
+    
+    satelliteWithLabels.addTo(modalMap);
+    
+    L.control.layers({
+        "🛰️ Спутник": satelliteWithLabels,
+        "🗺️ Обычная карта": regularMap
+    }, null, {
+        collapsed: false,
+        position: 'topright'
+    }).addTo(modalMap);
+    
+    L.control.scale({
+        position: 'bottomright',
+        imperial: false,
+        metric: true
+    }).addTo(modalMap);
+    
+    modalMap.on('click', function(e) {
+        modalSelectedLocation = e.latlng;
+        document.getElementById('selected-coords').innerHTML = 
+            `${modalSelectedLocation.lat.toFixed(6)}, ${modalSelectedLocation.lng.toFixed(6)}`;
+        
+        if (modalMarker) {
+            modalMap.removeLayer(modalMarker);
+        }
+        
+        modalMarker = L.marker(modalSelectedLocation, {
+            draggable: true,
+            title: "Выбранные координаты"
+        }).addTo(modalMap);
+        
+        modalMarker.on('dragend', function(e) {
+            const marker = e.target;
+            const position = marker.getLatLng();
+            modalSelectedLocation = position;
+            document.getElementById('selected-coords').innerHTML = 
+                `${position.lat.toFixed(6)}, ${position.lng.toFixed(6)}`;
+        });
+    });
+    
+    if (selectedLocation) {
+        modalMap.setView([selectedLocation.lat, selectedLocation.lng], 15);
+        modalSelectedLocation = selectedLocation;
+        document.getElementById('selected-coords').innerHTML = 
+            `${selectedLocation.lat.toFixed(6)}, ${selectedLocation.lng.toFixed(6)}`;
+        
+        modalMarker = L.marker(selectedLocation, {
+            draggable: true,
+            title: "Выбранные координаты"
+        }).addTo(modalMap);
+        
+        modalMarker.on('dragend', function(e) {
+            const marker = e.target;
+            const position = marker.getLatLng();
+            modalSelectedLocation = position;
+            document.getElementById('selected-coords').innerHTML = 
+                `${position.lat.toFixed(6)}, ${position.lng.toFixed(6)}`;
+        });
+    }
+}
+
+function confirmCoordsSelection() {
+    if (modalSelectedLocation) {
+        selectedLocation = modalSelectedLocation;
+        const coordsInput = document.getElementById('pano-coords');
+        if (coordsInput) {
+            coordsInput.value = `${selectedLocation.lat.toFixed(6)}, ${selectedLocation.lng.toFixed(6)}`;
+        }
+        logToConsole(`📍 Координаты сохранены: ${selectedLocation.lat.toFixed(6)}, ${selectedLocation.lng.toFixed(6)}`, 'success');
+    }
+    closeCoordsModal();
+}
+
+// ========== РЕЖИМ ВЫБОРА КООРДИНАТ ==========
+function toggleCoordSelection() {
+    openCoordsModal();
+}
+
+// ========== ПОИСК GOOGLE STREET VIEW ==========
+function toggleStreetViewSearch() {
+    if (!editMode) {
+        showNotification('❌ Сначала активируйте режим редактирования (Ctrl+Alt+A)', 'error');
+        return;
+    }
+    
+    streetViewSearchMode = !streetViewSearchMode;
+    const panel = document.getElementById('streetview-panel');
+    const btn = document.getElementById('search-streetview-btn');
+    
+    if (streetViewSearchMode) {
+        panel.style.display = 'block';
+        btn.style.background = 'rgba(52,168,83,1)';
+        btn.style.borderColor = '#34a853';
+        loadStreetViewPoints();
+    } else {
+        panel.style.display = 'none';
+        btn.style.background = 'rgba(66,133,244,0.9)';
+        btn.style.borderColor = '#4285f4';
+    }
+}
+
+function loadStreetViewPoints() {
+    const resultsDiv = document.getElementById('streetview-results');
+    resultsDiv.innerHTML = '';
+    const streetViewPanos = panoramas.filter(p => p.source === 'google');
+    
+    if (streetViewPanos.length === 0) {
+        resultsDiv.innerHTML = '<div class="streetview-result-item" style="color:#aaa;">Нет доступных панорам Street View</div>';
+        return;
+    }
+    
+    streetViewPanos.forEach(pano => {
+        const item = document.createElement('div');
+        item.className = 'streetview-result-item';
+        item.innerHTML = `<strong>${pano.icon} ${pano.name}</strong><br><small>${pano.description}</small>`;
+        item.onclick = () => selectStreetViewPano(pano);
+        resultsDiv.appendChild(item);
+    });
+}
+
+function selectStreetViewPano(pano) {
+    openPanorama(pano.id);
+    toggleStreetViewSearch();
+}
+
+// ========== РЕДАКТОР ПАНОРАМ ==========
+function openEditor(latLng = null, panoramaToEdit = null) {
+    if (!editMode) {
+        showNotification('❌ Сначала активируйте режим редактирования (Ctrl+Alt+A)', 'error');
+        return;
+    }
+    
+    selectedLocation = latLng;
+    currentEditPanorama = panoramaToEdit;
+    
+    document.getElementById('editor-overlay').style.display = 'block';
+    
+    if (selectingCoords) toggleCoordSelection();
+    if (streetViewSearchMode) toggleStreetViewSearch();
+    if (cacheManagerOpen) toggleCacheManager();
+    
+    setTimeout(() => {
+        document.getElementById('editor-overlay').style.opacity = '1';
+    }, 10);
+    
+    const isEditMode = panoramaToEdit !== null;
+    const isGooglePano = panoramaToEdit && panoramaToEdit.source === 'google';
+    const title = isEditMode ? '✏️ Редактировать панораму' : '✏️ Добавить 360° Панораму';
+    
+    const editorHTML = `
+        <div class="editor-container">
+            <h2>${title}</h2>
+            
+            <div style="margin-bottom:20px; padding:15px; background:rgba(255,170,0,0.1); border-radius:8px; border:2px solid #ffaa00;">
+                <h4 style="color:#ffaa00; margin:0 0 10px 0;">🎮 Управление редактированием</h4>
+                <p style="margin:0; color:#ffcc80;">
+                    <strong>Текущий режим: ${currentEditMode === 'add' ? 'Добавление' : currentEditMode === 'edit' ? 'Редактирование' : 'Удаление'}</strong><br>
+                    • <strong>1</strong> - Режим добавления<br>
+                    • <strong>2</strong> - Режим редактирования<br>
+                    • <strong>3</strong> - Режим удаления<br>
+                    • <strong>Ctrl+S</strong> - Сохранить кэш<br>
+                    • <strong>Ctrl+Alt+A</strong> - Выйти из режима редактирования
+                </p>
+            </div>
+            
+            ${isGooglePano ? `
+            <div style="margin-bottom:20px; padding:15px; background:rgba(52,168,83,0.1); border-radius:8px; border:2px solid #34a853;">
+                <h4 style="color:#34a853; margin:0 0 10px 0;">🌍 Панорама Google Street View</h4>
+                <p style="margin:0; color:#81c995;">Эта панорама загружена из Google Street View. Вы можете редактировать её информацию, но изображение будет заменено только при загрузке новой панорамы.</p>
+            </div>
+            ` : ''}
+            
+            <div class="form-group">
+                <label for="pano-name">Название места:</label>
+                <input type="text" id="pano-name" placeholder="Например: Центральная площадь" required
+                    value="${isEditMode ? panoramaToEdit.name : ''}">
+            </div>
+            
+            <div class="form-group">
+                <label for="pano-description">Описание:</label>
+                <textarea id="pano-description" placeholder="Краткое описание места..." required>${isEditMode ? panoramaToEdit.description : ''}</textarea>
+            </div>
+            
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="pano-icon">Иконка:</label>
+                    <select id="pano-icon">
+                        <option value="🏛️" ${isEditMode && panoramaToEdit.icon === '🏛️' ? 'selected' : ''}>🏛️ Здание</option>
+                        <option value="🌊" ${isEditMode && panoramaToEdit.icon === '🌊' ? 'selected' : ''}>🌊 Река/Водоем</option>
+                        <option value="🛒" ${isEditMode && panoramaToEdit.icon === '🛒' ? 'selected' : ''}>🛒 Рынок/Магазин</option>
+                        <option value="🌳" ${isEditMode && panoramaToEdit.icon === '🌳' ? 'selected' : ''}>🌳 Парк/Сквер</option>
+                        <option value="🚂" ${isEditMode && panoramaToEdit.icon === '🚂' ? 'selected' : ''}>🚂 Вокзал</option>
+                        <option value="🏫" ${isEditMode && panoramaToEdit.icon === '🏫' ? 'selected' : ''}>🏫 Школа</option>
+                        <option value="🏥" ${isEditMode && panoramaToEdit.icon === '🏥' ? 'selected' : ''}>🏥 Больница</option>
+                        <option value="🕌" ${isEditMode && panoramaToEdit.icon === '🕌' ? 'selected' : ''}>🕌 Мечеть</option>
+                        <option value="🏨" ${isEditMode && panoramaToEdit.icon === '🏨' ? 'selected' : ''}>🏨 Гостиница</option>
+                        <option value="⚽" ${isEditMode && panoramaToEdit.icon === '⚽' ? 'selected' : ''}>⚽ Стадион</option>
+                        <option value="🌍" ${isEditMode && panoramaToEdit.icon === '🌍' ? 'selected' : !isEditMode ? 'selected' : ''}>🌍 Street View</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="pano-date">Дата съемки:</label>
+                    <input type="text" id="pano-date" placeholder="Например: Сентябрь 2023" required
+                        value="${isEditMode ? panoramaToEdit.date : ''}">
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label for="pano-details">Подробности:</label>
+                <textarea id="pano-details" placeholder="Подробное описание места, история, особенности...">${isEditMode ? panoramaToEdit.details : ''}</textarea>
+            </div>
+            
+            <div class="form-group">
+                <label for="pano-coords">Координаты:</label>
+                <input type="text" id="pano-coords" readonly 
+                    value="${latLng ? `${latLng.lat.toFixed(6)}, ${latLng.lng.toFixed(6)}` : isEditMode ? `${panoramaToEdit.location[0].toFixed(6)}, ${panoramaToEdit.location[1].toFixed(6)}` : 'Нажмите "Выбрать координаты"'}">
+                <div style="margin-top:8px; display:flex; gap:10px;">
+                    <button onclick="openCoordsModal()" style="
+                        background:#ffaa00;
+                        color:black;
+                        border:none;
+                        padding:8px 15px;
+                        border-radius:5px;
+                        cursor:pointer;
+                        font-size:14px;
+                        flex:1;
+                    ">
+                        <i class="fas fa-map-marker-alt"></i> Выбрать на карте
+                    </button>
+                    <button onclick="useCurrentLocation()" style="
+                        background:#4285f4;
+                        color:white;
+                        border:none;
+                        padding:8px 15px;
+                        border-radius:5px;
+                        cursor:pointer;
+                        font-size:14px;
+                        flex:1;
+                    ">
+                        <i class="fas fa-location-arrow"></i> Моё местоположение
+                    </button>
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label for="pano-image">360° Фотография:</label>
+                <div style="display:flex; gap:10px; margin-bottom:10px;">
+                    <button onclick="document.getElementById('pano-image').click()" style="
+                        background:#00ffff;
+                        color:black;
+                        border:none;
+                        padding:10px 15px;
+                        border-radius:5px;
+                        cursor:pointer;
+                        flex:1;
+                    ">📁 Загрузить фото</button>
+                    <button onclick="searchInStreetView()" style="
+                        background:#34a853;
+                        color:white;
+                        border:none;
+                        padding:10px 15px;
+                        border-radius:5px;
+                        cursor:pointer;
+                        flex:1;
+                    ">🌍 Найти в Street View</button>
+                </div>
+                <input type="file" id="pano-image" accept="image/*" style="display:none;">
+                <small style="color:#aaa;">Выберите 360° фото или найдите в Google Street View</small>
+                <img id="image-preview" class="preview-image" alt="Предпросмотр" 
+                    src="${isEditMode ? panoramaToEdit.imageUrl : ''}" 
+                    style="${isEditMode ? 'display:block;' : 'display:none;'}">
+            </div>
+            
+            <div class="form-group">
+                <label for="pano-image-url">URL изображения:</label>
+                <input type="url" id="pano-image-url" placeholder="https://example.com/panorama.jpg"
+                    value="${isEditMode ? panoramaToEdit.imageUrl : ''}">
+                <button onclick="loadImageFromURL()" style="
+                    background:#00ff88;
+                    color:black;
+                    border:none;
+                    padding:8px 15px;
+                    border-radius:5px;
+                    cursor:pointer;
+                    margin-top:8px;
+                    width:100%;
+                ">📥 Загрузить по URL</button>
+            </div>
+            
+            <div class="editor-buttons">
+                <button class="editor-btn" id="save-btn">
+                    ${isEditMode ? '💾 Сохранить изменения' : '💾 Сохранить панораму'}
+                </button>
+                <button class="editor-btn" id="cancel-btn">❌ Отменить</button>
+                <button class="editor-btn" onclick="saveCacheFile()" 
+                        style="background:linear-gradient(135deg, #9c27b0, #673ab7); color:white;">
+                    <i class="fas fa-save"></i> Сохранить кэш
+                </button>
+                ${isEditMode ? `
+                <button class="editor-btn" id="delete-btn" style="background:linear-gradient(135deg, #ff4444, #cc0000); color:white;">
+                    🗑️ Удалить
+                </button>
+                ` : ''}
+            </div>
+        </div>
+    `;
+    
+    document.getElementById('editor-overlay').innerHTML = editorHTML;
+    
+    if (latLng && !isEditMode) {
+        selectedLocation = latLng;
+        document.getElementById('pano-coords').value = `${latLng.lat.toFixed(6)}, ${latLng.lng.toFixed(6)}`;
+    } else if (isEditMode) {
+        selectedLocation = { lat: panoramaToEdit.location[0], lng: panoramaToEdit.location[1] };
+    }
+    
+    document.getElementById('pano-image').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (file) {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const img = document.getElementById('image-preview');
+                img.src = e.target.result;
+                img.style.display = 'block';
+                document.getElementById('pano-image-url').value = e.target.result;
+            }
+            reader.readAsDataURL(file);
+        }
+    });
+    
+    document.getElementById('save-btn').addEventListener('click', function() {
+        savePanorama(isEditMode);
+    });
+    
+    document.getElementById('cancel-btn').addEventListener('click', closeEditor);
+    
+    if (isEditMode) {
+        document.getElementById('delete-btn').addEventListener('click', function() {
+            if (confirm(`Удалить панораму "${panoramaToEdit.name}"?`)) {
+                deletePanorama(panoramaToEdit.id);
+            }
+        });
+    }
+}
+
+function useCurrentLocation() {
+    if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(function(position) {
+            selectedLocation = {
+                lat: position.coords.latitude,
+                lng: position.coords.longitude
+            };
+            document.getElementById('pano-coords').value = 
+                `${selectedLocation.lat.toFixed(6)}, ${selectedLocation.lng.toFixed(6)}`;
+            logToConsole(`📍 Использовано ваше местоположение`, 'success');
+        }, function(error) {
+            logToConsole('❌ Не удалось получить местоположение', 'error');
+        });
+    } else {
+        logToConsole('❌ Геолокация не поддерживается', 'error');
+    }
+}
+
+function searchInStreetView() {
+    toggleStreetViewSearch();
+}
+
+function loadImageFromURL() {
+    const url = document.getElementById('pano-image-url').value;
+    if (!url) {
+        logToConsole('❌ Введите URL изображения', 'error');
+        return;
+    }
+    const img = document.getElementById('image-preview');
+    img.src = url;
+    img.style.display = 'block';
+    img.onload = function() {
+        logToConsole('✅ Изображение загружено', 'success');
+    };
+    img.onerror = function() {
+        logToConsole('❌ Не удалось загрузить изображение', 'error');
+    };
+}
+
+// ========== ФУНКЦИЯ СОХРАНЕНИЯ ПАНОРАМЫ ==========
+function savePanorama(isEdit = false) {
+    const name = document.getElementById('pano-name').value;
+    const description = document.getElementById('pano-description').value;
+    const icon = document.getElementById('pano-icon').value;
+    const date = document.getElementById('pano-date').value;
+    const details = document.getElementById('pano-details').value;
+    const coords = document.getElementById('pano-coords').value;
+    const imageUrl = document.getElementById('pano-image-url').value;
+    const imageInput = document.getElementById('pano-image');
+    
+    if (!name || !description || !date) {
+        showNotification('❌ Заполните все обязательные поля!', 'error');
+        return;
+    }
+    
+    if (!coords || !coords.includes(',')) {
+        showNotification('❌ Выберите место на карте!', 'error');
+        return;
+    }
+    
+    let parsedCoords;
+    try {
+        parsedCoords = coords.split(',').map(c => parseFloat(c.trim()));
+        if (parsedCoords.length !== 2 || isNaN(parsedCoords[0]) || isNaN(parsedCoords[1])) {
+            throw new Error('Неверный формат координат');
+        }
+    } catch (e) {
+        showNotification('❌ Неверный формат координат!', 'error');
+        return;
+    }
+    
+    let finalImageUrl = imageUrl;
+    const imageFile = imageInput.files[0];
+    
+    if (imageFile && !imageUrl.startsWith('data:')) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            finalImageUrl = e.target.result;
+            completeSave(name, description, icon, date, details, parsedCoords, finalImageUrl, isEdit);
+        };
+        reader.readAsDataURL(imageFile);
+    } else {
+        completeSave(name, description, icon, date, details, parsedCoords, finalImageUrl, isEdit);
+    }
+}
+
+function completeSave(name, description, icon, date, details, coords, imageUrl, isEdit) {
+    if (isEdit && currentEditPanorama) {
+        const index = panoramas.findIndex(p => p.id === currentEditPanorama.id);
+        if (index !== -1) {
+            panoramas[index] = {
+                id: currentEditPanorama.id,
+                name: name,
+                description: description,
+                icon: icon,
+                date: date,
+                details: details,
+                location: coords,
+                imageUrl: imageUrl,
+                source: currentEditPanorama.source || "user",
+                panoId: currentEditPanorama.panoId || `user_${Date.now()}`
+            };
+            
+            logToConsole(`✏️ Панорама "${name}" обновлена`, 'success');
+            showNotification(`✅ Панорама "${name}" обновлена`);
+        }
+    } else {
+        const newPanorama = {
+            id: Date.now(),
+            name: name,
+            description: description,
+            location: coords,
+            date: date,
+            imageUrl: imageUrl,
+            details: details,
+            icon: icon,
+            source: "user",
+            panoId: `user_${Date.now()}`
+        };
+        
+        panoramas.push(newPanorama);
+        logToConsole(`✅ Панорама "${name}" добавлена`, 'success');
+        showNotification(`✅ Панорама "${name}" добавлена`);
+    }
+    
+    // Сохраняем в кэш
+    setTimeout(async () => {
+        await saveCacheFile();
+    }, 1000);
+    
+    updatePanoramasOnMap();
+    closeEditor();
+}
+
+// ========== ФУНКЦИЯ УДАЛЕНИЯ ==========
+function deletePanorama(panoramaId) {
+    const panorama = panoramas.find(p => p.id === panoramaId);
+    if (!panorama) return;
+    
+    // Удаляем маркер с карты
+    if (panoramaMarkers[panoramaId] && map) {
+        map.removeLayer(panoramaMarkers[panoramaId]);
+        delete panoramaMarkers[panoramaId];
+    }
+    
+    panoramas = panoramas.filter(p => p.id !== panoramaId);
+    
+    setTimeout(async () => {
+        await saveCacheFile();
+    }, 1000);
+    
+    logToConsole(`🗑️ Панорама "${panorama?.name || 'Неизвестная'}" удалена`, 'warning');
+    showNotification(`🗑️ Панорама "${panorama?.name || 'Неизвестная'}" удалена`);
+    
+    if (document.getElementById('editor-overlay').style.display === 'block') {
+        closeEditor();
+    }
+}
+
+function closeEditor() {
+    document.getElementById('editor-overlay').style.opacity = '0';
+    
+    setTimeout(() => {
+        document.getElementById('editor-overlay').style.display = 'none';
+        document.getElementById('editor-overlay').innerHTML = '';
+        selectedLocation = null;
+        currentEditPanorama = null;
+    }, 300);
+}
+
+// ========== ИСТОРИЯ И ОБНОВЛЕНИЕ ==========
+function logToConsole(message, type = 'info') {
+    const consoleDiv = document.getElementById('console-content');
+    const timestamp = new Date().toLocaleTimeString();
+    
+    let color = '#00ff00';
+    if (type === 'error') color = '#ff4444';
+    if (type === 'warning') color = '#ffaa00';
+    if (type === 'info') color = '#00ffff';
+    
+    consoleDiv.innerHTML += `<div style="color:${color}; margin-bottom:5px;">
+        <span style="color:#aaa;">[${timestamp}]</span> ${message}
+    </div>`;
+    
+    consoleDiv.scrollTop = consoleDiv.scrollHeight;
+    document.getElementById('editor-console').style.display = 'block';
+}
+
+function closeConsole() {
+    document.getElementById('editor-console').style.display = 'none';
+}
+
+function updateHTMLCode() {
+    const cleanPanoramas = cleanPanoramaData(panoramas);
+    const panoramasCode = `let panoramas = ${JSON.stringify(cleanPanoramas, null, 2)};`;
+    const scriptTags = document.getElementsByTagName('script');
+    for (let script of scriptTags) {
+        const content = script.innerHTML;
+        if (content.includes('let panoramas = [')) {
+            const startIndex = content.indexOf('let panoramas = [');
+            const endIndex = content.indexOf('];', startIndex) + 2;
+            
+            if (startIndex !== -1 && endIndex !== -1) {
+                const newContent = content.substring(0, startIndex) + panoramasCode + content.substring(endIndex);
+                script.innerHTML = newContent;
+                break;
+            }
+        }
+    }
+}
+
+// ========== THREE.JS EARTH ==========
+function initEarth() {
+    const scene = new THREE.Scene();
+    earthScene = scene;
+    
+    const camera = new THREE.PerspectiveCamera(
+        45, 
+        window.innerWidth / window.innerHeight, 
+        0.1, 
+        1000
+    );
+    
+    const renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: true
+    });
+    
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    document.getElementById('earth').appendChild(renderer.domElement);
+    
+    const texLoader = new THREE.TextureLoader();
+    
+    const earthTexture = texLoader.load(
+        'https://raw.githubusercontent.com/jeromeetienne/threex.planets/master/images/earthmap1k.jpg',
+        function() {
+            document.getElementById('loading').style.display = 'none';
+            initializePanoramas();
+            setupHotkeys();
+        }
+    );
+    
+    const cloudsTexture = texLoader.load(
+        'https://raw.githubusercontent.com/jeromeetienne/threex.planets/master/images/earthcloudmap.jpg'
+    );
+    
+    const earthGeometry = new THREE.SphereGeometry(5, 64, 64);
+    const earthMaterial = new THREE.MeshStandardMaterial({
+        map: earthTexture,
+        roughness: 0.7,
+        metalness: 0.2
+    });
+    
+    const earth = new THREE.Mesh(earthGeometry, earthMaterial);
+    scene.add(earth);
+    
+    const cloudsGeometry = new THREE.SphereGeometry(5.05, 64, 64);
+    const cloudsMaterial = new THREE.MeshStandardMaterial({
+        map: cloudsTexture,
+        transparent: true,
+        opacity: 0.4
+    });
+    
+    const clouds = new THREE.Mesh(cloudsGeometry, cloudsMaterial);
+    scene.add(clouds);
+    
+    scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+    const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
+    sunLight.position.set(10, 10, 10);
+    scene.add(sunLight);
+    
+    function rotateToCoordinates(lat, lon) {
+        const lonRad = (lon * Math.PI) / 180;
+        const latRad = (lat * Math.PI) / 180;
+        earth.rotation.y = -lonRad - (Math.PI / 2);
+        earth.rotation.x = -latRad;
+        clouds.rotation.copy(earth.rotation);
+    }
+    
+    rotateToCoordinates(50, 20);
+    
+    camera.position.set(0, 0, 12);
+    let targetZ = 12;
+    let targetRotationY = earth.rotation.y;
+    let targetRotationX = earth.rotation.x;
+    let autoRotate = false;
+    
+    function animate() {
+        requestAnimationFrame(animate);
+        
+        camera.position.z += (targetZ - camera.position.z) * 0.02;
+        earth.rotation.y += (targetRotationY - earth.rotation.y) * 0.02;
+        earth.rotation.x += (targetRotationX - earth.rotation.x) * 0.02;
+        clouds.rotation.copy(earth.rotation);
+        
+        renderer.render(scene, camera);
+    }
+    
+    animate();
+    
+    const zoomSteps = [
+        {z: 10, lat: 40, lon: 30, delay: 1000, autoRotate: false},
+        {z: 8, lat: 45, lon: 40, delay: 2000, autoRotate: false},
+        {z: 6, lat: 48, lon: 60, delay: 3500, autoRotate: false},
+        {z: 4.5, lat: 45, lon: 68, delay: 5000, autoRotate: false},
+        {z: 3.5, lat: 40.77, lon: 68.3, delay: 7000, autoRotate: false, callback: showMap}
+    ];
+    
+    let currentStep = 0;
+    function executeZoomStep(stepIndex) {
+        if (stepIndex >= zoomSteps.length) return;
+        
+        const step = zoomSteps[stepIndex];
+        setTimeout(() => {
+            targetZ = step.z;
+            targetRotationY = (-step.lon * Math.PI / 180) - (Math.PI / 2);
+            targetRotationX = -step.lat * Math.PI / 180;
+            autoRotate = step.autoRotate;
+            
+            if (step.callback) {
+                setTimeout(step.callback, 1000);
+            }
+            
+            executeZoomStep(stepIndex + 1);
+        }, step.delay);
+    }
+    
+    executeZoomStep(0);
+    
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        if (map) map.invalidateSize();
+        if (modalMap) modalMap.invalidateSize();
+        if (panoramaScene) {
+            panoramaScene.camera.aspect = window.innerWidth / window.innerHeight;
+            panoramaScene.camera.updateProjectionMatrix();
+            panoramaScene.renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+    });
+}
+
+// ========== LEAFLET MAP ==========
+function showMap() {
+    currentView = 'map';
+    document.getElementById('earth').style.opacity = '0';
+    
+    setTimeout(() => {
+        document.getElementById('earth').style.display = 'none';
+        document.getElementById('map').style.display = 'block';
+        
+        setTimeout(() => {
+            document.getElementById('map').style.opacity = '1';
+            initLeafletMap();
+        }, 100);
+    }, 1500);
+}
+
+function initLeafletMap() {
+    const jetysaiCoords = [40.77, 68.3];
+    
+    map = L.map('map', {
+        zoomControl: true,
+        attributionControl: false,
+        dragging: true
+    }).setView(jetysaiCoords, 13);
+    
+    const satelliteWithLabels = L.tileLayer('http://{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', {
+        maxZoom: 20,
+        subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
+        attribution: ''
+    });
+    
+    const hybridBackup = L.layerGroup();
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 19,
+        attribution: ''
+    }).addTo(hybridBackup);
+    
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png', {
+        maxZoom: 20,
+        opacity: 0.8,
+        attribution: ''
+    }).addTo(hybridBackup);
+    
+    const regularMap = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: ''
+    });
+    
+    function tryGoogleHybrid() {
+        try {
+            satelliteWithLabels.addTo(map);
+            return true;
+        } catch (e) {
+            hybridBackup.addTo(map);
+            return false;
+        }
+    }
+    
+    const googleAvailable = tryGoogleHybrid();
+    
+    const baseLayers = {
+        "🛰️ Спутник с названиями": googleAvailable ? satelliteWithLabels : hybridBackup,
+        "🗺️ Обычная карта": regularMap
+    };
+    
+    L.control.layers(baseLayers, null, {
+        collapsed: false,
+        position: 'topright'
+    }).addTo(map);
+    
+    L.control.scale({
+        position: 'bottomright',
+        imperial: false,
+        metric: true
+    }).addTo(map);
+    
+    map.on('click', function(e) {
+        if (editMode && currentEditMode === 'add') {
+            openEditor(e.latlng);
+        }
+    });
+    
+    updatePanoramasOnMap();
+    setupUserLocation();
+    
+    setTimeout(() => {
+        document.getElementById('label').style.opacity = '1';
+        document.getElementById('label').style.animation = 'pulse 3s infinite';
+    }, 1000);
+}
+
+// ========== ДОБАВЛЕНИЕ МАРКЕРА НА КАРТУ ==========
+function addPanoramaToMap(pano) {
+    if (!map) return;
+    
+    const isGooglePano = pano.source === 'google';
+    const markerClass = isGooglePano ? 'streetview-marker' : 'panorama-marker';
+    const markerColor = isGooglePano ? '#34a853' : '#ff6b6b';
+    
+    const panoIcon = L.divIcon({
+        html: `
+            <div class="${markerClass}">
+                <div class="icon" style="background: radial-gradient(circle, ${markerColor} 0%, ${markerColor}33 70%); box-shadow: 0 0 20px ${markerColor};">
+                    ${pano.icon}
+                </div>
+            </div>`,
+        iconSize: isGooglePano ? [40, 40] : [45, 45],
+        iconAnchor: isGooglePano ? [20, 20] : [22.5, 22.5],
+        className: 'panorama-icon'
+    });
+    
+    const location = Array.isArray(pano.location) ? pano.location : 
+                    (pano.location && pano.location.lat && pano.location.lng) ? 
+                    [pano.location.lat, pano.location.lng] : [40.77, 68.3];
+    
+    const marker = L.marker(location, {
+        icon: panoIcon,
+        title: pano.name,
+        zIndexOffset: 1000,
+        riseOnHover: true
+    }).addTo(map);
+    
+    marker.on('mouseover', function() {
+        currentPanorama = pano;
+        
+        const popupContent = `
+            <div style="text-align:center; min-width:200px;">
+                <h4 style="margin:0 0 5px 0; color:${isGooglePano ? '#34a853' : '#ff6b6b'};">${pano.icon} ${pano.name}</h4>
+                <p style="margin:0; font-size:12px;">${pano.description}</p>
+                <div style="margin:5px 0; font-size:11px; color:#666;">
+                    ${isGooglePano ? '<span style="color:#34a853;">🌍 Street View</span>' : '<span style="color:#ff6b6b;">🔴 Пользовательская</span>'}
+                </div>
+                <div style="margin-top:10px;">
+                    <button onclick="event.stopPropagation(); openPanorama(${pano.id})" style="
+                        background:${isGooglePano ? '#34a853' : '#ff6b6b'};
+                        color:white;
+                        border:none;
+                        padding:6px 12px;
+                        border-radius:4px;
+                        cursor:pointer;
+                        font-size:12px;
+                        width:100%;
+                    ">👁️ Просмотреть панораму</button>
+                </div>
+            </div>
+        `;
+        
+        marker.bindPopup(popupContent).openPopup();
+    });
+    
+    marker.on('click', function(e) {
+        currentPanorama = pano;
+        
+        if (editMode) {
+            if (currentEditMode === 'edit') {
+                openEditor(null, pano);
+            } else if (currentEditMode === 'delete') {
+                e.originalEvent.preventDefault();
+                e.originalEvent.stopPropagation();
+                
+                if (confirm(`Удалить панораму "${pano.name}"?`)) {
+                    map.removeLayer(marker);
+                    delete panoramaMarkers[pano.id];
+                    deletePanorama(pano.id);
+                }
+            } else {
+                openPanorama(pano.id);
+            }
+        } else {
+            openPanorama(pano.id);
+        }
+    });
+    
+    panoramaMarkers[pano.id] = marker;
+}
+
+function updatePanoramasOnMap() {
+    if (map) {
+        Object.values(panoramaMarkers).forEach(marker => {
+            map.removeLayer(marker);
+        });
+        panoramaMarkers = {};
+    }
+    
+    panoramas.forEach(pano => {
+        addPanoramaToMap(pano);
+    });
+}
+
+// ========== 360° ПАНОРАМА (ТОЛЬКО ПРОСМОТР) ==========
+function openPanorama(panoId) {
+    const pano = panoramas.find(p => p.id === panoId);
+    if (!pano) return;
+    
+    currentPanorama = pano;
+    currentView = 'panorama';
+    
+    document.getElementById('map').style.opacity = '0';
+    document.getElementById('back-button').style.display = 'block';
+    document.getElementById('select-coords-btn').style.display = 'none';
+    document.getElementById('search-streetview-btn').style.display = 'none';
+    document.getElementById('cache-manager-btn').style.display = 'none';
+    document.getElementById('edit-indicator').style.display = 'none';
+    document.getElementById('edit-modes-panel').style.display = 'none';
+    
+    setTimeout(() => {
+        document.getElementById('map').style.display = 'none';
+        document.getElementById('panorama-viewer').style.display = 'block';
+        
+        setTimeout(() => {
+            document.getElementById('panorama-viewer').style.opacity = '1';
+            initPanoramaViewer(pano);
+        }, 100);
+    }, 500);
+}
+
+function initPanoramaViewer(pano) {
+    const viewer = document.getElementById('panorama-viewer');
+    while (viewer.firstChild) {
+        viewer.removeChild(viewer.firstChild);
+    }
+    
+    try {
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        viewer.appendChild(renderer.domElement);
+        
+        const geometry = new THREE.SphereGeometry(500, 60, 40);
+        geometry.scale(-1, 1, 1);
+        
+        const textureLoader = new THREE.TextureLoader();
+        let textureUrl = pano.imageUrl;
+        
+        if (!textureUrl.startsWith('http')) {
+            textureUrl = window.location.origin + '/' + textureUrl;
+        }
+        
+        textureLoader.load(
+            textureUrl,
+            function(texture) {
+                const material = new THREE.MeshBasicMaterial({ map: texture, side: THREE.BackSide });
+                const sphere = new THREE.Mesh(geometry, material);
+                scene.add(sphere);
+                addPanoramaInfoToViewer(pano);
+            },
+            undefined,
+            function(error) {
+                console.warn('Не удалось загрузить 360° фото:', error);
+                createFallbackPanorama(pano, scene, geometry);
+            }
+        );
+        
+        camera.position.set(0, 0, 0.1);
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableZoom = true;
+        controls.enablePan = false;
+        controls.rotateSpeed = 0.3;
+        
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        
+        animate();
+        
+        panoramaScene = { scene, camera, renderer, controls };
+        
+        window.addEventListener('resize', function onResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+        
+    } catch (error) {
+        viewer.innerHTML = `
+            <div style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center; color:white; background:rgba(0,0,0,0.8); padding:30px; border-radius:15px;">
+                <h2>${pano.icon} ${pano.name}</h2>
+                <p>${pano.description}</p>
+                <img src="${pano.imageUrl}" style="max-width:300px; border-radius:10px; margin:20px 0;" onerror="this.src='https://via.placeholder.com/300x200/333333/ffffff?text=Фото+не+загрузилось'">
+                <p><small>${pano.details}</small></p>
+                <div style="margin-top:20px;">
+                    <button onclick="closePanorama()" style="background:#ff4444; color:white; border:none; padding:10px 20px; border-radius:5px; cursor:pointer; margin:5px;">Закрыть</button>
+                </div>
+            </div>
+        `;
+    }
+}
+
+function createFallbackPanorama(pano, scene, geometry) {
+    const color = pano.source === 'google' ? 0x34a853 : 0xff6b6b;
+    const material = new THREE.MeshBasicMaterial({ color: color, side: THREE.BackSide, transparent: true, opacity: 0.7 });
+    const sphere = new THREE.Mesh(geometry, material);
+    scene.add(sphere);
+    addPanoramaInfoToViewer(pano, true);
+}
+
+function addPanoramaInfoToViewer(pano, isFallback = false) {
+    const viewer = document.getElementById('panorama-viewer');
+    const oldInfo = document.getElementById('panorama-info');
+    if (oldInfo) oldInfo.remove();
+    
+    const infoDiv = document.createElement('div');
+    infoDiv.id = 'panorama-info';
+    infoDiv.style.cssText = `
+        position: absolute;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(0, 0, 0, 0.85);
+        color: white;
+        padding: 15px 25px;
+        border-radius: 12px;
+        border: 2px solid ${pano.source === 'google' ? '#34a853' : '#ff6b6b'};
+        max-width: 90%;
+        text-align: center;
+        z-index: 1000;
+        backdrop-filter: blur(10px);
+        box-shadow: 0 0 30px rgba(0,0,0,0.5);
+    `;
+    
+    infoDiv.innerHTML = `
+        <h3 style="margin:0 0 8px 0; color:${pano.source === 'google' ? '#34a853' : '#ff6b6b'}">${pano.icon} ${pano.name}</h3>
+        <p style="margin:0 0 5px 0; font-size:14px;">${pano.description}</p>
+        <p style="margin:0; font-size:12px; color:#aaa;">📍 ${pano.location[0].toFixed(6)}, ${pano.location[1].toFixed(6)}</p>
+        <p style="margin:0; font-size:12px; color:#aaa;">📅 ${pano.date}</p>
+        <div style="display:flex; justify-content:center; gap:15px; margin-top:15px;">
+            <button onclick="closePanorama()" style="background: #666; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 14px; display: flex; align-items: center; gap: 5px;">
+                <i class="fas fa-times"></i> Закрыть
+            </button>
+        </div>
+        ${isFallback ? `
+        <div style="margin-top:10px; padding:8px; background:rgba(255,100,0,0.2); border-radius:5px; font-size:12px;">
+            <i class="fas fa-exclamation-triangle"></i> Оригинальное 360° фото не загрузилось.
+        </div>
+        ` : ''}
+    `;
+    
+    viewer.appendChild(infoDiv);
+}
+
+function closePanorama() {
+    currentView = 'map';
+    document.getElementById('panorama-viewer').style.opacity = '0';
+    document.getElementById('back-button').style.display = 'none';
+    
+    setTimeout(() => {
+        document.getElementById('panorama-viewer').style.display = 'none';
+        document.getElementById('map').style.display = 'block';
+        
+        setTimeout(() => {
+            document.getElementById('map').style.opacity = '1';
+            if (editMode) {
+                document.getElementById('select-coords-btn').style.display = 'block';
+                document.getElementById('search-streetview-btn').style.display = 'block';
+                document.getElementById('cache-manager-btn').style.display = 'block';
+                document.getElementById('edit-indicator').style.display = 'block';
+                document.getElementById('edit-modes-panel').style.display = 'block';
+            }
+            
+            if (panoramaScene) {
+                panoramaScene.renderer.dispose();
+                panoramaScene = null;
+            }
+            currentPanorama = null;
+        }, 100);
+    }, 500);
+}
+
+// ========== ФУНКЦИЯ ВОЗВРАТА ==========
+function showEarth() {
+    currentView = 'earth';
+    document.getElementById('map').style.opacity = '0';
+    document.getElementById('back-button').style.display = 'none';
+    document.getElementById('label').style.opacity = '0';
+    document.getElementById('label').style.animation = 'none';
+    document.getElementById('edit-indicator').style.display = 'none';
+    document.getElementById('edit-modes-panel').style.display = 'none';
+    document.getElementById('cache-manager-btn').style.display = 'none';
+    document.getElementById('cache-panel').style.display = 'none';
+    
+    setTimeout(() => {
+        document.getElementById('map').style.display = 'none';
+        if (map) {
+            map.remove();
+            map = null;
+        }
+        document.getElementById('earth').style.display = 'block';
+        
+        setTimeout(() => {
+            document.getElementById('earth').style.opacity = '1';
+        }, 100);
+    }, 1500);
+}
+
+// ========== ИНИЦИАЛИЗАЦИЯ ==========
+function detectWebGL() {
+    try {
+        const canvas = document.createElement('canvas');
+        return !!(window.WebGLRenderingContext && (canvas.getContext('webgl') || canvas.getContext('experimental-webgl')));
+    } catch(e) {
+        return false;
+    }
+}
+
+// Инициализация при загрузке
+document.addEventListener('DOMContentLoaded', () => {
+    if (!detectWebGL()) {
+        document.getElementById('loading').innerHTML = '❌ WebGL не поддерживается';
+        return;
+    }
+    
+    // Назначаем обработчики кнопок
+    document.getElementById('back-button').addEventListener('click', function() {
+        if (currentView === 'panorama') {
+            closePanorama();
+        } else if (currentView === 'map') {
+            showEarth();
+        }
+    });
+    
+    document.getElementById('select-coords-btn').addEventListener('click', toggleCoordSelection);
+    document.getElementById('search-streetview-btn').addEventListener('click', toggleStreetViewSearch);
+    document.getElementById('cache-manager-btn').addEventListener('click', toggleCacheManager);
+    document.getElementById('add-mode-btn').addEventListener('click', () => setEditMode('add'));
+    document.getElementById('edit-mode-btn').addEventListener('click', () => setEditMode('edit'));
+    document.getElementById('delete-mode-btn').addEventListener('click', () => setEditMode('delete'));
+    document.getElementById('export-cache-btn').addEventListener('click', saveCacheFile);
+    document.getElementById('import-cache-btn').addEventListener('click', importCacheFile);
+    document.getElementById('clear-cache-btn').addEventListener('click', clearLocalCache);
+    document.getElementById('cancel-modal-btn').addEventListener('click', closeCoordsModal);
+    document.getElementById('confirm-modal-btn').addEventListener('click', confirmCoordsSelection);
+    document.getElementById('editor-console').querySelector('.console-close').addEventListener('click', closeConsole);
+    
+    initEarth();
+    
+    console.log('%c🚀 Система 360° панорам Жетысая загружена', 'color: #00ff00; font-size: 16px; font-weight: bold;');
+    console.log('%c💾 Файловый кэш: jetysai_panoramas_cache.json', 'color: #9c27b0;');
+    console.log('%c📍 Автоматическое определение местоположения включено', 'color: #4285f4;');
+    console.log('%c🔴 Пользовательские панорамы - красные маркеры', 'color: #ff6b6b;');
+});
